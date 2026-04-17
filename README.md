@@ -3,6 +3,18 @@
 Apple Silicon Mac에서 미팅 녹음을 로컬로 전사하는 도구.
 Notta 같은 유료 서비스 없이, 더 높은 퀄리티로 전사 + 화자 분리까지 가능.
 
+최근 업데이트:
+- `mlx_whisper` word timestamp 기반 후처리
+- `pyannote` diarization만 직접 호출해서 불필요한 ASR 중복 제거
+- `pyannote`의 exclusive diarization을 우선 사용해 STT/화자 매칭 품질 개선
+- `whispermlx` 화자 분리 결과를 더 촘촘하게 병합
+- diarize 시 공유 16kHz mono WAV를 한 번만 만들어 전사/화자분리 재사용
+- txt-only 전사에서는 불필요한 word timestamp 생성을 생략
+- `txt/json/srt/vtt` 출력 지원
+- artifact/cache 저장으로 재실행 속도 개선
+- 긴 오디오 자동 chunking
+- HF 토큰 환경변수 지원
+
 ## How it works
 
 두 개의 오픈소스 도구를 조합해서 각각의 장점만 사용:
@@ -62,6 +74,12 @@ whispermlx --help
 python3 transcribe.py meeting.m4a
 ```
 
+로컬 설정 파일(`.transcribe.local.json`)에 기본 오디오/토큰을 넣어두면:
+
+```bash
+python3 transcribe.py
+```
+
 출력: `./meeting.txt`
 
 ```
@@ -70,11 +88,39 @@ python3 transcribe.py meeting.m4a
 00:17 예정상으로는 그렇긴 합니다.
 ```
 
+artifact도 함께 생성:
+
+- `./meeting.artifacts/final.json`
+- `./meeting.artifacts/mlx_merged.json`
+
 ### 전사 + 화자 분리
 
+토큰은 CLI 인자 또는 환경변수로 전달 가능:
+
 ```bash
-python3 transcribe.py meeting.m4a --diarize --hf-token YOUR_TOKEN
+export HF_TOKEN=hf_your_token
+python3 transcribe.py meeting.m4a --diarize
 ```
+
+또는:
+
+```bash
+python3 transcribe.py meeting.m4a --diarize --hf-token hf_your_token
+```
+
+또는 로컬 전용 설정 파일:
+
+```json
+{
+  "audio": "./recordings/meeting.m4a",
+  "diarize": true,
+  "hf_token": "hf_your_token",
+  "output_dir": ".",
+  "formats": "txt,json"
+}
+```
+
+파일명은 `./.transcribe.local.json`이며 `.gitignore`에 포함해 두는 것을 권장.
 
 출력: `./meeting.txt`
 
@@ -87,18 +133,52 @@ python3 transcribe.py meeting.m4a --diarize --hf-token YOUR_TOKEN
 ### 출력 디렉토리 지정
 
 ```bash
-python3 transcribe.py meeting.m4a --diarize --hf-token YOUR_TOKEN -o ./output
+python3 transcribe.py meeting.m4a --diarize -o ./output
 ```
 
-## Tips
-
-### 긴 오디오는 30분 단위로 분할
-
-Whisper는 오디오가 길어질수록 후반부 품질이 떨어짐. 1시간 이상이면 분할 후 전사.
+### 여러 출력 형식 생성
 
 ```bash
-ffmpeg -i meeting.m4a -f segment -segment_time 1800 -c copy meeting_%03d.m4a
+python3 transcribe.py meeting.m4a --formats txt,json,srt,vtt
 ```
+
+또는:
+
+```bash
+python3 transcribe.py meeting.m4a --formats all
+```
+
+### 긴 오디오 자동 chunking
+
+기본적으로 60분이 넘는 오디오는 30분 단위로 자동 분할해서 처리한다.
+
+```bash
+python3 transcribe.py long_meeting.m4a
+```
+
+직접 조정:
+
+```bash
+python3 transcribe.py long_meeting.m4a --chunk-minutes 20 --auto-chunk-minutes 40
+```
+
+자동 chunking 비활성화:
+
+```bash
+python3 transcribe.py long_meeting.m4a --no-auto-chunk
+```
+
+### 화자 분리 속도
+
+현재 화자 분리 단계는 불필요한 ASR/align를 생략하고 `pyannote` diarization만 직접 실행한다.
+또한 diarize 모드에서는 공유 작업용 WAV를 한 번만 만들어 전사/화자분리에서 같이 사용한다.
+가능한 경우 pyannote의 `exclusive` diarization 결과를 우선 사용해 word-speaker reconciliation 오차를 줄인다.
+이전보다 diarize 모드 속도가 더 빨라진 대신, `--diarize-asr-model` 옵션은 호환성만 남아 있고 실제로는 사용되지 않는다.
+
+전사만 할 때 `--formats txt`로 실행하면 word timestamp를 만들지 않아 더 빠르다.
+`--formats json` 또는 `--diarize`에서는 기존처럼 word-level 데이터가 유지된다.
+
+## Tips
 
 ### `--language` 옵션 사용하지 않기
 
@@ -113,7 +193,26 @@ ffmpeg -i meeting.m4a -f segment -segment_time 1800 -c copy meeting_%03d.m4a
 - Apple Silicon Mac (M1/M2/M3/M4)
 - Python 3.9+ (mlx-whisper용)
 - [uv](https://github.com/astral-sh/uv) (whispermlx 설치용)
-- ffmpeg (오디오 분할 시): `brew install ffmpeg`
+- ffmpeg: `brew install ffmpeg`
+
+## Output
+
+기본 출력:
+
+- `meeting.txt`
+
+선택 출력:
+
+- `meeting.json`
+- `meeting.srt`
+- `meeting.vtt`
+
+artifact/cache:
+
+- `meeting.artifacts/final.json`: 최종 병합 결과
+- `meeting.artifacts/mlx_merged.json`: mlx 전사 병합본
+- `meeting.artifacts/speaker_intervals.json`: 화자 구간
+- `meeting.artifacts/chunk_*/...`: chunk별 raw 결과
 
 ## Benchmarks
 
